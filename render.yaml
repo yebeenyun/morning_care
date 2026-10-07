@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: morning-care
+    runtime: docker
+    plan: starter
+    healthCheckPath: /api/me
+    envVars:
+      - key: PORT
+        value: "10000"
+      - key: DATABASE_PATH
+        value: /var/data/morning.db
+    disk:
+      name: morning-care-data
+      mountPath: /var/data
+      sizeGB: 1

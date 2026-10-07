@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f8f8f5">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="모닝케어">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <link rel="manifest" href="/manifest.json">
+  <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+  <link rel="icon" href="/icons/icon.svg" type="image/svg+xml">
+  <title>모닝케어 · 주모닝 헬스케어</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Gowun+Dodum&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <main id="authView" class="auth-shell" hidden></main>
+  <div id="appView" class="app-shell" hidden>
+    <aside class="sidebar">
+      <a class="brand" href="#" aria-label="모닝케어 홈"><span class="brand-mark">m</span><span>모닝<span class="brand-light">케어</span></span></a>
+      <div class="side-label">MENU</div>
+      <nav class="side-nav" aria-label="주 메뉴">
+        <button class="nav-item active" data-tab="home"><span class="nav-icon">⌂</span>오늘의 케어</button>
+        <button class="nav-item" data-tab="temperature"><span class="nav-icon">♧</span>체온 기록</button>
+        <button class="nav-item" data-tab="feeding"><span class="nav-icon">◉</span>식사 기록</button>
+        <button class="nav-item" data-tab="medication"><span class="nav-icon">✳</span>약 복용</button>
+        <button class="nav-item" data-tab="elimination"><span class="nav-icon">◒</span>소변 · 대변</button>
+        <button class="nav-item" data-tab="vitality"><span class="nav-icon">♡</span>활력 징후</button>
+      </nav>
+      <div class="side-bottom">
+        <div class="side-label">함께 돌봐요</div>
+        <button id="sideInvite" class="invite-card">
+          <span class="invite-icon">＋</span><span><strong>가족 초대하기</strong><small>함께 기록을 관리해요</small></span><span class="arrow">›</span>
+        </button>
+        <button id="userMenu" class="user-profile">
+          <span class="user-avatar">🐾</span><span class="user-meta"><strong id="sideUserName">보호자</strong><small>보호자 프로필</small></span><span class="dots">···</span>
+        </button>
+      </div>
+    </aside>
+    <section class="workspace">
+      <header class="topbar">
+        <div class="mobile-brand"><span class="brand-mark">m</span> 모닝케어</div>
+        <div class="breadcrumb">나의 반려생활 <span>/</span> <strong id="breadcrumbName">오늘의 케어</strong></div>
+        <div class="top-actions">
+          <span class="today-label" id="todayLabel"></span>
+          <button class="install-button" data-pwa-install aria-label="앱 설치" title="홈 화면에 추가">앱 설치</button>
+          <button id="joinCareButton" class="join-button">초대 코드 입력</button>
+          <button id="dogProfileButton" class="dog-mini" aria-label="강아지 프로필 보기"><span class="dog-mini-face">🐶</span><span id="topDogName">주모닝</span><span class="chevron">⌄</span></button>
+        </div>
+      </header>
+      <div class="page-content">
+        <section class="page-heading">
+          <div><div class="eyebrow" id="headingEyebrow">WEDNESDAY, OCTOBER 7</div><h1 id="pageTitle">주모닝의 하루 <span class="title-paw">✳</span></h1><p id="pageSubtitle">오늘도 함께, 천천히 건강을 챙겨봐요.</p></div>
+          <button class="primary-button" id="mainAddButton"><span>＋</span> 기록 추가</button>
+        </section>
+        <div id="tabContent"></div>
+      </div>
+    </section>
+    <nav class="mobile-nav" aria-label="하단 메뉴">
+      <button class="nav-item active" data-tab="home"><span class="nav-icon">⌂</span><small>오늘</small></button>
+      <button class="nav-item" data-tab="temperature"><span class="nav-icon">♧</span><small>체온</small></button>
+      <button class="nav-item" data-tab="feeding"><span class="nav-icon">◉</span><small>식사</small></button>
+      <button class="nav-item" data-tab="medication"><span class="nav-icon">✳</span><small>복약</small></button>
+      <button class="nav-item" data-tab="elimination"><span class="nav-icon">◒</span><small>배변</small></button>
+      <button class="nav-item" data-tab="vitality"><span class="nav-icon">♡</span><small>활력</small></button>
+    </nav>
+  </div>
+  <div id="modalRoot"></div>
+  <script src="/app.js" defer></script>
+</body>
+</html>
