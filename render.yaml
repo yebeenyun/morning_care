@@ -7,8 +7,14 @@ services:
     envVars:
       - key: PORT
         value: "10000"
+      - key: HOST
+        value: 0.0.0.0
       - key: DATABASE_PATH
         value: /var/data/morning.db
+      - key: ADMIN_EMAIL
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
     disk:
       name: morning-care-data
       mountPath: /var/data

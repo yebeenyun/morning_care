@@ -11,6 +11,7 @@ const state = {
   medication: [],
   elimination: [],
   vitality: [],
+  adminData: null,
   reminders: localStorage.getItem("morning-reminders") === "on",
   notified: new Set(),
 };
@@ -132,21 +133,32 @@ async function boot() {
     }
     state.user = result.user;
     state.dogs = result.dogs;
+    const isAdmin = state.user.role === "admin";
+    $$(".admin-nav-item").forEach((button) => { button.hidden = !isAdmin; });
+    $$(".nav-item:not(.admin-nav-item)").forEach((button) => { button.hidden = isAdmin; });
+    $("#sideInvite").hidden = isAdmin;
+    $("#joinCareButton").hidden = isAdmin;
+    $("#dogProfileButton").hidden = isAdmin;
+    $("#sideUserName").textContent = state.user.name;
+    $("#authView").hidden = true;
+    $("#appView").hidden = false;
+    $("#todayLabel").textContent = new Date().toLocaleDateString("ko-KR", { year: "numeric", month: "long", day: "numeric", weekday: "short" });
+    if (isAdmin) {
+      state.tab = "admin";
+      await loadAdminData();
+      render();
+      return;
+    }
+    state.tab = "home";
     if (!state.dogs.length) {
       state.dog = null;
-      $("#authView").hidden = true;
-      $("#appView").hidden = false;
       renderEmptyDogs();
       return;
     }
     const selectedId = Number(localStorage.getItem("morning-dog-id"));
     state.dog = state.dogs.find((dog) => dog.id === selectedId) || state.dogs[0];
     localStorage.setItem("morning-dog-id", state.dog.id);
-    $("#authView").hidden = true;
-    $("#appView").hidden = false;
-    $("#sideUserName").textContent = state.user.name;
     $("#topDogName").textContent = state.dog.name;
-    $("#todayLabel").textContent = new Date().toLocaleDateString("ko-KR", { year: "numeric", month: "long", day: "numeric", weekday: "short" });
     setHeading();
     await loadRecords();
     render();
@@ -155,6 +167,10 @@ async function boot() {
     showAuth();
     setToast(error.message);
   }
+}
+
+async function loadAdminData() {
+  state.adminData = await api("/api/admin/overview");
 }
 
 function renderEmptyDogs() {
@@ -184,6 +200,10 @@ function setHeading() {
 }
 
 function render() {
+  if (state.tab === "admin" && state.user?.role === "admin") {
+    renderAdmin();
+    return;
+  }
   if (!state.dog) return;
   setHeading();
   $$(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.tab === state.tab));
@@ -215,6 +235,56 @@ function render() {
     fab.addEventListener("click", () => openRecordModal());
     $("#appView").append(fab);
   }
+}
+
+function renderAdmin() {
+  if (!state.adminData) return;
+  const data = state.adminData;
+  const membershipsByDog = new Map();
+  data.memberships.forEach((membership) => {
+    if (!membershipsByDog.has(membership.dog_id)) membershipsByDog.set(membership.dog_id, []);
+    membershipsByDog.get(membership.dog_id).push(membership);
+  });
+  const kindNames = {
+    temperature: "체온",
+    feeding: "강급",
+    medication: "복약",
+    elimination: "소변·대변",
+    vitality: "활력 징후",
+  };
+  const recordValue = (record) => {
+    if (record.kind === "temperature") return `${record.value}°C`;
+    if (record.kind === "feeding") return `${record.value}ml`;
+    if (record.kind === "medication") return `${record.dose_index}회차 복용`;
+    if (record.kind === "vitality") return `${escapeHTML(record.detail)} (${record.value}/3)`;
+    return escapeHTML(record.detail);
+  };
+  $("#breadcrumbName").textContent = "전체 데이터";
+  $("#pageTitle").textContent = "관리자 전체 데이터";
+  $("#pageSubtitle").textContent = "모든 보호자·강아지 프로필과 건강 기록을 조회합니다. 이 화면은 읽기 전용입니다.";
+  $("#headingEyebrow").textContent = "ADMIN · READ ONLY";
+  $("#mainAddButton").hidden = true;
+  $("#fabButton")?.remove();
+  $$(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.tab === "admin"));
+  $("#tabContent").innerHTML = `<div class="admin-overview">
+    <div class="admin-stats">
+      <div class="card admin-stat"><small>보호자 계정</small><strong>${data.users.length}</strong></div>
+      <div class="card admin-stat"><small>강아지 프로필</small><strong>${data.dogs.length}</strong></div>
+      <div class="card admin-stat"><small>건강 기록</small><strong>${data.records.length}</strong></div>
+    </div>
+    <section class="card admin-section"><div class="section-head"><div><h2>강아지 프로필</h2><span class="metric-caption">모든 등록 프로필과 연결된 보호자</span></div></div>
+      ${data.dogs.length ? `<div class="admin-table-scroll"><table class="admin-table"><thead><tr><th>강아지</th><th>출생 연도</th><th>병명</th><th>복약 시작</th><th>보호자</th></tr></thead><tbody>${data.dogs.map((dog) => {
+        const members = membershipsByDog.get(dog.id) || [];
+        return `<tr><td><strong>${escapeHTML(dog.name)}</strong></td><td>${dog.birth_year}</td><td>${escapeHTML(dog.diagnosis || "—")}</td><td>${escapeHTML(dog.med_start)}</td><td>${members.map((member) => `<span class="admin-member">${escapeHTML(member.name)} · ${escapeHTML(member.email)} <small>${member.role === "owner" ? "보호자" : "케어 멤버"}</small></span>`).join("") || "—"}</td></tr>`;
+      }).join("")}</tbody></table></div>` : `<div class="empty-state">강아지 프로필이 없습니다.</div>`}
+    </section>
+    <section class="card admin-section"><div class="section-head"><div><h2>보호자 계정</h2><span class="metric-caption">관리자 및 일반 계정</span></div></div>
+      ${data.users.length ? `<div class="admin-table-scroll"><table class="admin-table"><thead><tr><th>이름</th><th>이메일</th><th>권한</th><th>참여 프로필</th></tr></thead><tbody>${data.users.map((account) => `<tr><td>${escapeHTML(account.name)}</td><td>${escapeHTML(account.email)}</td><td><span class="soft-tag">${account.role === "admin" ? "관리자" : "보호자"}</span></td><td>${account.dog_count}</td></tr>`).join("")}</tbody></table></div>` : `<div class="empty-state">사용자 계정이 없습니다.</div>`}
+    </section>
+    <section class="card admin-section"><div class="section-head"><div><h2>전체 건강 기록</h2><span class="metric-caption">최신순 · 기록자와 강아지 포함</span></div></div>
+      ${data.records.length ? `<div class="admin-table-scroll"><table class="admin-table"><thead><tr><th>측정 시각</th><th>강아지</th><th>종류</th><th>기록</th><th>기록자</th></tr></thead><tbody>${data.records.map((record) => `<tr><td>${escapeHTML(new Date(record.recorded_at).toLocaleString("ko-KR"))}</td><td>${escapeHTML(record.dog_name)}</td><td>${kindNames[record.kind] || escapeHTML(record.kind)}</td><td>${recordValue(record)}</td><td>${escapeHTML(record.caregiver)}<small class="admin-email">${escapeHTML(record.caregiver_email)}</small></td></tr>`).join("")}</tbody></table></div>` : `<div class="empty-state">건강 기록이 없습니다.</div>`}
+    </section>
+  </div>`;
 }
 
 function ageText() {

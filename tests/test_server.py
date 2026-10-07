@@ -1,5 +1,6 @@
 import http.cookiejar
 import json
+import os
 import sqlite3
 import tempfile
 import threading
@@ -9,6 +10,7 @@ import urllib.request
 from datetime import datetime
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from unittest.mock import patch
 
 import server
 
@@ -82,6 +84,7 @@ class SharedCareApiTests(unittest.TestCase):
                 ("2026-10-07T05:13+00:00", 39.3),
                 ("2026-10-07T05:24+00:00", 39.1),
                 ("2026-10-07T05:43+00:00", 38.4),
+                ("2026-10-07T08:09+00:00", 39.5),
             ],
         )
         status, records = self.request(self.owner, f"/api/dogs/{dog['id']}/feeding")
@@ -112,7 +115,7 @@ class SharedCareApiTests(unittest.TestCase):
         server.initialize()
         status, records = self.request(self.owner, f"/api/dogs/{dog['id']}/temperature")
         self.assertEqual(status, 200)
-        self.assertEqual(len(records["records"]), 5)
+        self.assertEqual(len(records["records"]), 6)
 
         status, _ = self.register(self.caregiver, "서준", "seojun@example.com")
         self.assertEqual(status, 201)
@@ -207,6 +210,110 @@ class SharedCareApiTests(unittest.TestCase):
                 self.assertEqual(response.status, 200)
                 self.assertIn(expected_type, response.headers.get("Content-Type", ""))
 
+    def test_admin_can_read_all_profiles_and_records_but_regular_users_cannot(self):
+        self.register(self.owner, "민지", "admin-visibility-owner@example.com")
+        _, owner_profile = self.request(self.owner, "/api/me")
+        dog_id = owner_profile["dogs"][0]["id"]
+
+        status, forbidden = self.request(self.owner, "/api/admin/overview")
+        self.assertEqual(status, 403)
+        self.assertIn("관리자", forbidden["error"])
+
+        status, unauthorized = self.request(self.make_client(), "/api/admin/overview")
+        self.assertEqual(status, 401)
+        self.assertIn("로그인", unauthorized["error"])
+
+        admin_email = "admin@example.com"
+        admin_password = "a-long-test-admin-password"
+        with patch.dict(os.environ, {"ADMIN_EMAIL": admin_email, "ADMIN_PASSWORD": admin_password}):
+            server.initialize()
+        status, login = self.request(self.caregiver, "/api/login", "POST", {
+            "email": admin_email,
+            "password": admin_password,
+        })
+        self.assertEqual(status, 200)
+        self.assertEqual(login["user"]["role"], "admin")
+        status, profile = self.request(self.caregiver, "/api/me")
+        self.assertEqual(status, 200)
+        self.assertEqual(profile["user"]["role"], "admin")
+        status, overview = self.request(self.caregiver, "/api/admin/overview")
+        self.assertEqual(status, 200)
+        self.assertTrue(any(dog["id"] == dog_id for dog in overview["dogs"]))
+        self.assertTrue(any(account["email"] == "admin-visibility-owner@example.com" for account in overview["users"]))
+        self.assertTrue(any(record["dog_id"] == dog_id and record["kind"] == "temperature" for record in overview["records"]))
+        self.assertTrue(all("invite_code" not in dog for dog in overview["dogs"]))
+
+        with patch.dict(os.environ, {"ADMIN_EMAIL": admin_email, "ADMIN_PASSWORD": "a-new-test-admin-password"}):
+            server.initialize()
+        status, expired = self.request(self.caregiver, "/api/admin/overview")
+        self.assertEqual(status, 401)
+        self.assertIn("로그인", expired["error"])
+        status, _ = self.request(self.make_client(), "/api/login", "POST", {
+            "email": admin_email,
+            "password": admin_password,
+        })
+        self.assertEqual(status, 401)
+        status, login = self.request(self.make_client(), "/api/login", "POST", {
+            "email": admin_email,
+            "password": "a-new-test-admin-password",
+        })
+        self.assertEqual(status, 200)
+        self.assertEqual(login["user"]["role"], "admin")
+
+    def test_admin_credentials_must_be_set_together_and_strong(self):
+        with tempfile.TemporaryDirectory() as directory:
+            previous_db_path = server.DB_PATH
+            server.DB_PATH = str(Path(directory) / "bootstrap.db")
+            try:
+                with patch.dict(os.environ, {"ADMIN_EMAIL": "admin@example.com"}, clear=True):
+                    with self.assertRaisesRegex(RuntimeError, "모두 설정"):
+                        server.initialize()
+                with patch.dict(os.environ, {"ADMIN_EMAIL": "admin@example.com", "ADMIN_PASSWORD": "short"}):
+                    with self.assertRaisesRegex(RuntimeError, "16자 이상"):
+                        server.initialize()
+            finally:
+                server.DB_PATH = previous_db_path
+
+    def test_admin_bootstraps_demo_dog_and_health_data_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            previous_db_path = server.DB_PATH
+            server.DB_PATH = str(Path(directory) / "admin-demo.db")
+            try:
+                with patch.dict(os.environ, {
+                    "ADMIN_EMAIL": "admin@example.com",
+                    "ADMIN_PASSWORD": "a-long-test-admin-password",
+                }):
+                    server.initialize()
+                    server.initialize()
+                with server.database() as db:
+                    dogs = db.execute(
+                        "SELECT d.id,d.name,d.birth_year,d.diagnosis,u.role "
+                        "FROM dogs d JOIN memberships m ON m.dog_id=d.id "
+                        "JOIN users u ON u.id=m.user_id WHERE d.name='주모닝'"
+                    ).fetchall()
+                    self.assertEqual(len(dogs), 1)
+                    self.assertEqual(
+                        (dogs[0]["name"], dogs[0]["birth_year"], dogs[0]["diagnosis"], dogs[0]["role"]),
+                        ("주모닝", 2017, "바베시아", "admin"),
+                    )
+                    self.assertEqual(
+                        db.execute(
+                            "SELECT COUNT(*) FROM records WHERE dog_id=?",
+                            (dogs[0]["id"],),
+                        ).fetchone()[0],
+                        14,
+                    )
+                    self.assertEqual(
+                        db.execute(
+                            "SELECT COUNT(*) FROM records WHERE dog_id=? AND kind='temperature' "
+                            "AND recorded_at='2026-10-07T08:09+00:00'",
+                            (dogs[0]["id"],),
+                        ).fetchone()[0],
+                        1,
+                    )
+            finally:
+                server.DB_PATH = previous_db_path
+
     def test_existing_database_migrates_and_seeds_default_dog_once(self):
         with tempfile.TemporaryDirectory() as directory:
             previous_db_path = server.DB_PATH
@@ -240,7 +347,7 @@ class SharedCareApiTests(unittest.TestCase):
                 with server.database() as db:
                     kinds = db.execute("SELECT kind,COUNT(*) AS count FROM records GROUP BY kind").fetchall()
                     counts = {row["kind"]: row["count"] for row in kinds}
-                    self.assertEqual(counts["temperature"], 6)
+                    self.assertEqual(counts["temperature"], 7)
                     self.assertEqual(counts["elimination"], 2)
                     self.assertEqual(counts["feeding"], 4)
                     self.assertEqual(counts["medication"], 2)
@@ -252,6 +359,8 @@ class SharedCareApiTests(unittest.TestCase):
                         db.execute("SELECT med_start FROM dogs WHERE id=1").fetchone()["med_start"],
                         "07:30",
                     )
+                    self.assertIn("role", {row["name"] for row in db.execute("PRAGMA table_info(users)")})
+                    self.assertEqual(db.execute("SELECT role FROM users WHERE id=1").fetchone()["role"], "user")
             finally:
                 server.DB_PATH = previous_db_path
 

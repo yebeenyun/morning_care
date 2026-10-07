@@ -18,6 +18,7 @@ from urllib.parse import urlparse
 ROOT = Path(__file__).resolve().parent
 DB_PATH = os.environ.get("DATABASE_PATH", str(ROOT / "data" / "morning.db"))
 PORT = int(os.environ.get("PORT", "8000"))
+HOST = os.environ.get("HOST", "0.0.0.0")
 SESSION_DAYS = 14
 KOREA_TIME = timezone(timedelta(hours=9))
 RECORD_KINDS = ("temperature", "feeding", "medication", "elimination", "vitality")
@@ -53,6 +54,7 @@ def initialize():
                 name TEXT NOT NULL,
                 email TEXT NOT NULL UNIQUE,
                 password_hash TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('user', 'admin')),
                 created_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS sessions (
@@ -91,6 +93,11 @@ def initialize():
             );
             """
         )
+        user_columns = {row["name"] for row in db.execute("PRAGMA table_info(users)")}
+        if "role" not in user_columns:
+            db.execute(
+                "ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('user', 'admin'))"
+            )
         schema = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='records'").fetchone()["sql"]
         if "elimination" not in schema or "vitality" not in schema:
             db.execute("DROP INDEX IF EXISTS records_dog_kind_time")
@@ -110,6 +117,8 @@ def initialize():
             )
             db.execute("DROP TABLE records_legacy")
         db.execute("CREATE INDEX IF NOT EXISTS records_dog_kind_time ON records(dog_id, kind, recorded_at)")
+        bootstrap_admin(db)
+        ensure_admin_demo_dog(db)
         default_dogs = db.execute(
             "SELECT id FROM dogs WHERE name='주모닝' AND birth_year=2017 AND diagnosis='바베시아'"
         ).fetchall()
@@ -120,6 +129,48 @@ def initialize():
             ).fetchone()
             if owner:
                 add_sample_records(db, dog["id"], owner["user_id"])
+                add_requested_temperature(db, dog["id"], owner["user_id"])
+
+
+def bootstrap_admin(db):
+    email = os.environ.get("ADMIN_EMAIL", "").strip().lower()
+    password = os.environ.get("ADMIN_PASSWORD", "")
+    if not email and not password:
+        return
+    if not email or not password:
+        raise RuntimeError("ADMIN_EMAIL과 ADMIN_PASSWORD를 모두 설정해야 합니다.")
+    if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+        raise RuntimeError("ADMIN_EMAIL에 올바른 이메일 주소를 설정해야 합니다.")
+    if len(password) < 4 or len(password) > 200:
+        raise RuntimeError("ADMIN_PASSWORD는 16자 이상, 200자 이하로 설정해야 합니다.")
+    stored_hash = password_hash(password)
+    existing = db.execute("SELECT id,password_hash FROM users WHERE email=?", (email,)).fetchone()
+    if existing and not hmac.compare_digest(existing["password_hash"], stored_hash):
+        db.execute("DELETE FROM sessions WHERE user_id=?", (existing["id"],))
+    db.execute(
+        "INSERT INTO users(name,email,password_hash,role,created_at) VALUES(?,?,?,?,?) "
+        "ON CONFLICT(email) DO UPDATE SET name='관리자',password_hash=excluded.password_hash,role='admin'",
+        ("관리자", email, stored_hash, "admin", now_iso()),
+    )
+
+
+def ensure_admin_demo_dog(db):
+    admin = db.execute("SELECT id FROM users WHERE role='admin' ORDER BY id LIMIT 1").fetchone()
+    if not admin:
+        return
+    dog = db.execute(
+        "SELECT id FROM dogs WHERE name='주모닝' AND birth_year=2017 AND diagnosis='바베시아' LIMIT 1"
+    ).fetchone()
+    if dog:
+        return
+    cursor = db.execute(
+        "INSERT INTO dogs(name,birth_year,diagnosis,invite_code,med_start,created_at) VALUES(?,?,?,?,?,?)",
+        ("주모닝", 2017, "바베시아", secrets.token_hex(4).upper(), "07:30", now_iso()),
+    )
+    db.execute(
+        "INSERT INTO memberships(user_id,dog_id,role) VALUES(?,?,'owner')",
+        (admin["id"], cursor.lastrowid),
+    )
 
 
 def now_iso():
@@ -180,6 +231,7 @@ def add_sample_records(db, dog_id, user_id):
         ("temperature", 39.3, "", "2026-10-07T14:13", None),
         ("temperature", 39.1, "", "2026-10-07T14:24", None),
         ("temperature", 38.4, "", "2026-10-07T14:43", None),
+        ("temperature", 39.5, "", "2026-10-07T17:09", None),
         ("feeding", 25, "", "2026-10-07T07:15", None),
         ("feeding", 5, "", "2026-10-07T14:51", None),
         ("feeding", 15, "", "2026-10-07T15:00", None),
@@ -207,6 +259,19 @@ def add_sample_records(db, dog_id, user_id):
         ],
     )
     db.execute("INSERT INTO seeded_dog_data(dog_id) VALUES(?)", (dog_id,))
+
+
+def add_requested_temperature(db, dog_id, user_id):
+    recorded_at = datetime.fromisoformat("2026-10-07T17:09").replace(tzinfo=KOREA_TIME)
+    recorded_at = recorded_at.astimezone(timezone.utc).isoformat(timespec="minutes")
+    db.execute(
+        "INSERT INTO records(dog_id,user_id,kind,value,detail,recorded_at,dose_index,created_at) "
+        "SELECT ?,?,'temperature',39.5,'',?,NULL,? "
+        "WHERE NOT EXISTS ("
+        "SELECT 1 FROM records WHERE dog_id=? AND kind='temperature' AND value=39.5 AND recorded_at=?"
+        ")",
+        (dog_id, user_id, recorded_at, now_iso(), dog_id, recorded_at),
+    )
 
 
 class AppHandler(BaseHTTPRequestHandler):
@@ -255,7 +320,7 @@ class AppHandler(BaseHTTPRequestHandler):
             return None
         token_hash = hashlib.sha256(morsel.value.encode()).hexdigest()
         row = db.execute(
-            "SELECT u.id,u.name,u.email FROM sessions s JOIN users u ON u.id=s.user_id "
+            "SELECT u.id,u.name,u.email,u.role FROM sessions s JOIN users u ON u.id=s.user_id "
             "WHERE s.token_hash=? AND s.expires_at>?",
             (token_hash, int(time.time())),
         ).fetchone()
@@ -306,7 +371,7 @@ class AppHandler(BaseHTTPRequestHandler):
                         db.execute("INSERT INTO memberships(user_id,dog_id,role) VALUES(?,?,?)", (user_id, dog_id, "owner"))
                         add_sample_records(db, dog_id, user_id)
                     session = create_session(db, user_id)
-                    self.json_response(201, {"user": {"id": user_id, "name": name, "email": email}}, session)
+                    self.json_response(201, {"user": {"id": user_id, "name": name, "email": email, "role": "user"}}, session)
                     return
 
                 if path == "/api/login" and method == "POST":
@@ -317,7 +382,7 @@ class AppHandler(BaseHTTPRequestHandler):
                         self.json_response(HTTPStatus.UNAUTHORIZED, {"error": "이메일 또는 비밀번호를 확인해 주세요."})
                         return
                     session = create_session(db, user["id"])
-                    self.json_response(200, {"user": {"id": user["id"], "name": user["name"], "email": user["email"]}}, session)
+                    self.json_response(200, {"user": {"id": user["id"], "name": user["name"], "email": user["email"], "role": user["role"]}}, session)
                     return
 
                 user = self.current_user(db)
@@ -345,6 +410,39 @@ class AppHandler(BaseHTTPRequestHandler):
 
                 if not user:
                     self.json_response(HTTPStatus.UNAUTHORIZED, {"error": "로그인이 필요합니다."})
+                    return
+
+                if path == "/api/admin/overview" and method == "GET":
+                    if user["role"] != "admin":
+                        self.json_response(HTTPStatus.FORBIDDEN, {"error": "관리자만 전체 데이터를 조회할 수 있습니다."})
+                        return
+                    dogs = db.execute(
+                        "SELECT d.id,d.name,d.birth_year,d.diagnosis,d.med_start,d.created_at "
+                        "FROM dogs d ORDER BY d.name,d.id"
+                    ).fetchall()
+                    users = db.execute(
+                        "SELECT u.id,u.name,u.email,u.role,u.created_at,"
+                        "COUNT(DISTINCT m.dog_id) AS dog_count "
+                        "FROM users u LEFT JOIN memberships m ON m.user_id=u.id "
+                        "GROUP BY u.id ORDER BY u.created_at DESC,u.id DESC"
+                    ).fetchall()
+                    memberships = db.execute(
+                        "SELECT m.dog_id,u.name,u.email,m.role "
+                        "FROM memberships m JOIN users u ON u.id=m.user_id "
+                        "ORDER BY m.dog_id,u.name"
+                    ).fetchall()
+                    records = db.execute(
+                        "SELECT r.id,r.kind,r.value,r.detail,r.recorded_at,r.dose_index,r.created_at,"
+                        "d.id AS dog_id,d.name AS dog_name,u.name AS caregiver,u.email AS caregiver_email "
+                        "FROM records r JOIN dogs d ON d.id=r.dog_id JOIN users u ON u.id=r.user_id "
+                        "ORDER BY r.recorded_at DESC,r.id DESC"
+                    ).fetchall()
+                    self.json_response(200, {
+                        "dogs": [dict(dog) for dog in dogs],
+                        "users": [dict(account) for account in users],
+                        "memberships": [dict(membership) for membership in memberships],
+                        "records": [dict(record) for record in records],
+                    })
                     return
 
                 if path == "/api/join" and method == "POST":
@@ -530,5 +628,5 @@ class AppHandler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     initialize()
-    print(f"Morning Care is listening on 0.0.0.0:{PORT}")
-    ThreadingHTTPServer(("0.0.0.0", PORT), AppHandler).serve_forever()
+    print(f"Morning Care is listening on {HOST}:{PORT}")
+    ThreadingHTTPServer((HOST, PORT), AppHandler).serve_forever()

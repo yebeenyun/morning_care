@@ -9,8 +9,8 @@
   <meta name="apple-mobile-web-app-title" content="모닝케어">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <link rel="manifest" href="/manifest.json">
-  <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
-  <link rel="icon" href="/icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png?v=2">
+  <link rel="icon" href="/icons/icon.svg?v=2" type="image/svg+xml">
   <title>모닝케어 · 주모닝 헬스케어</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -31,6 +31,7 @@
         <button class="nav-item" data-tab="medication"><span class="nav-icon">✳</span>약 복용</button>
         <button class="nav-item" data-tab="elimination"><span class="nav-icon">◒</span>소변 · 대변</button>
         <button class="nav-item" data-tab="vitality"><span class="nav-icon">♡</span>활력 징후</button>
+        <button class="nav-item admin-nav-item" data-tab="admin" hidden><span class="nav-icon">▤</span>전체 데이터</button>
       </nav>
       <div class="side-bottom">
         <div class="side-label">함께 돌봐요</div>
@@ -68,6 +69,7 @@
       <button class="nav-item" data-tab="medication"><span class="nav-icon">✳</span><small>복약</small></button>
       <button class="nav-item" data-tab="elimination"><span class="nav-icon">◒</span><small>배변</small></button>
       <button class="nav-item" data-tab="vitality"><span class="nav-icon">♡</span><small>활력</small></button>
+      <button class="nav-item admin-nav-item" data-tab="admin" hidden><span class="nav-icon">▤</span><small>관리자</small></button>
     </nav>
   </div>
   <div id="modalRoot"></div>
