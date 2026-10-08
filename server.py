@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import json
+import math
 import os
 import re
 import secrets
@@ -21,7 +22,7 @@ PORT = int(os.environ.get("PORT", "8000"))
 HOST = os.environ.get("HOST", "0.0.0.0")
 SESSION_DAYS = 14
 KOREA_TIME = timezone(timedelta(hours=9))
-RECORD_KINDS = ("temperature", "feeding", "hydration", "medication", "elimination", "vitality")
+RECORD_KINDS = ("temperature", "feeding", "hydration", "medication", "elimination", "vitality", "weight")
 
 
 def connect():
@@ -81,7 +82,7 @@ def initialize():
                 id INTEGER PRIMARY KEY,
                 dog_id INTEGER NOT NULL REFERENCES dogs(id) ON DELETE CASCADE,
                 user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-                kind TEXT NOT NULL CHECK (kind IN ('temperature', 'feeding', 'hydration', 'medication', 'elimination', 'vitality')),
+                kind TEXT NOT NULL CHECK (kind IN ('temperature', 'feeding', 'hydration', 'medication', 'elimination', 'vitality', 'weight')),
                 value REAL,
                 detail TEXT NOT NULL DEFAULT '',
                 recorded_at TEXT NOT NULL,
@@ -116,7 +117,7 @@ def initialize():
                 "id INTEGER PRIMARY KEY,"
                 "dog_id INTEGER NOT NULL REFERENCES dogs(id) ON DELETE CASCADE,"
                 "user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,"
-                "kind TEXT NOT NULL CHECK (kind IN ('temperature','feeding','hydration','medication','elimination','vitality')),"
+                "kind TEXT NOT NULL CHECK (kind IN ('temperature','feeding','hydration','medication','elimination','vitality','weight')),"
                 "value REAL, detail TEXT NOT NULL DEFAULT '', recorded_at TEXT NOT NULL,"
                 "dose_index INTEGER, created_at TEXT NOT NULL,"
                 "feeding_method TEXT NOT NULL DEFAULT 'assisted' CHECK (feeding_method IN ('assisted','self')),"
@@ -161,6 +162,7 @@ def initialize():
             if owner:
                 add_sample_records(db, dog["id"], owner["user_id"])
                 add_requested_temperature(db, dog["id"], owner["user_id"])
+                add_requested_weights(db, dog["id"], owner["user_id"])
 
 
 def bootstrap_admin(db):
@@ -251,6 +253,68 @@ def valid_recorded_at(value):
     return parsed.astimezone(timezone.utc).isoformat(timespec="minutes")
 
 
+def korea_record_date(value):
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(KOREA_TIME).date()
+
+
+def validated_record_fields(kind, data):
+    recorded_at = valid_recorded_at(data.get("recorded_at"))
+    value = None
+    dose_index = None
+    detail = clean_text(data.get("detail", ""), "메모", 200, allow_empty=True)
+    memo = clean_text(data.get("memo", ""), "메모", 200, allow_empty=True)
+    feeding_method = "assisted"
+    if kind == "temperature":
+        try:
+            value = float(data.get("value"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("체온을 숫자로 입력해 주세요.") from exc
+        if not math.isfinite(value) or not 30 <= value <= 45:
+            raise ValueError("체온은 30~45°C 범위로 입력해 주세요.")
+        value = round(value, 1)
+    elif kind in ("feeding", "hydration", "weight"):
+        label = {"feeding": "급여량", "hydration": "음수량", "weight": "몸무게"}[kind]
+        try:
+            value = float(data.get("value"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{label}을 숫자로 입력해 주세요.") from exc
+        maximum = 200 if kind == "weight" else 2000
+        unit = "kg" if kind == "weight" else "ml"
+        if not math.isfinite(value) or not 0.1 <= value <= maximum:
+            raise ValueError(f"{label}은 0.1~{maximum}{unit} 범위로 입력해 주세요.")
+        value = round(value, 2 if kind == "weight" else 1)
+        if kind == "feeding":
+            feeding_method = data.get("feeding_method", "assisted")
+            if feeding_method not in ("assisted", "self"):
+                raise ValueError("식사 방법을 선택해 주세요.")
+    elif kind == "medication":
+        try:
+            dose_index = int(data.get("dose_index"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("복약 회차를 선택해 주세요.") from exc
+        if dose_index not in (1, 2, 3):
+            raise ValueError("복약 회차를 선택해 주세요.")
+    elif kind == "elimination":
+        if detail not in ("소변", "대변"):
+            raise ValueError("소변 또는 대변을 선택해 주세요.")
+    elif kind == "vitality":
+        try:
+            value = int(data.get("value"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("활력 상태를 선택해 주세요.") from exc
+        if value not in (1, 2, 3):
+            raise ValueError("활력 상태를 선택해 주세요.")
+        detail = {1: "좋음", 2: "보통", 3: "나쁨"}[value]
+    else:
+        raise ValueError("기록 종류를 확인해 주세요.")
+    if kind != "vitality":
+        memo = ""
+    return recorded_at, value, detail, dose_index, feeding_method, memo
+
+
 def add_sample_records(db, dog_id, user_id):
     if db.execute("SELECT 1 FROM seeded_dog_data WHERE dog_id=?", (dog_id,)).fetchone():
         return
@@ -309,6 +373,18 @@ def add_requested_temperature(db, dog_id, user_id):
         ")",
         (dog_id, user_id, recorded_at, now_iso(), dog_id, recorded_at),
     )
+
+
+def add_requested_weights(db, dog_id, user_id):
+    for day, value in (("2026-10-07", 6.1), ("2026-10-08", 6.2)):
+        recorded_at = datetime.fromisoformat(f"{day}T12:00").replace(tzinfo=KOREA_TIME)
+        recorded_at = recorded_at.astimezone(timezone.utc).isoformat(timespec="minutes")
+        db.execute(
+            "INSERT INTO records(dog_id,user_id,kind,value,detail,recorded_at,created_at) "
+            "SELECT ?,?,'weight',?,'',?,? WHERE NOT EXISTS "
+            "(SELECT 1 FROM records WHERE dog_id=? AND kind='weight' AND recorded_at=?)",
+            (dog_id, user_id, value, recorded_at, now_iso(), dog_id, recorded_at),
+        )
 
 
 class AppHandler(BaseHTTPRequestHandler):
@@ -407,6 +483,7 @@ class AppHandler(BaseHTTPRequestHandler):
                         dog_id = dog_cursor.lastrowid
                         db.execute("INSERT INTO memberships(user_id,dog_id,role) VALUES(?,?,?)", (user_id, dog_id, "owner"))
                         add_sample_records(db, dog_id, user_id)
+                        add_requested_weights(db, dog_id, user_id)
                     session = create_session(db, user_id)
                     self.json_response(201, {"user": {"id": user_id, "name": name, "email": email, "role": "user"}}, session)
                     return
@@ -516,18 +593,45 @@ class AppHandler(BaseHTTPRequestHandler):
                     return
 
                 dog_match = re.fullmatch(
-                    r"/api/dogs/(\d+)(?:/(temperature|feeding|hydration|medication|elimination|vitality|schedule|invite))?",
+                    r"/api/dogs/(\d+)(?:/(temperature|feeding|hydration|medication|elimination|vitality|weight|schedule|invite|records)(?:/(\d+))?)?",
                     path,
                 )
                 if dog_match:
                     dog_id = int(dog_match.group(1))
                     section = dog_match.group(2)
+                    record_id = int(dog_match.group(3)) if dog_match.group(3) else None
                     member = db.execute(
                         "SELECT role FROM memberships WHERE user_id=? AND dog_id=?",
                         (user["id"], dog_id),
                     ).fetchone()
                     if not member:
                         self.json_response(HTTPStatus.NOT_FOUND, {"error": "강아지 프로필을 찾을 수 없습니다."})
+                        return
+                    if section == "records" and record_id and method == "PUT":
+                        if user["role"] == "admin":
+                            self.json_response(HTTPStatus.FORBIDDEN, {"error": "관리자 계정은 기록을 수정할 수 없습니다."})
+                            return
+                        record = db.execute(
+                            "SELECT kind FROM records WHERE id=? AND dog_id=?",
+                            (record_id, dog_id),
+                        ).fetchone()
+                        if not record:
+                            self.json_response(HTTPStatus.NOT_FOUND, {"error": "기록을 찾을 수 없습니다."})
+                            return
+                        fields = validated_record_fields(record["kind"], data)
+                        if record["kind"] == "weight":
+                            same_day = db.execute(
+                                "SELECT id,recorded_at FROM records WHERE dog_id=? AND kind='weight' AND id!=?",
+                                (dog_id, record_id),
+                            ).fetchall()
+                            if any(korea_record_date(item["recorded_at"]) == korea_record_date(fields[0]) for item in same_day):
+                                raise ValueError("몸무게는 하루에 한 번만 기록할 수 있어요.")
+                        db.execute(
+                            "UPDATE records SET recorded_at=?,value=?,detail=?,dose_index=?,"
+                            "feeding_method=?,memo=? WHERE id=? AND dog_id=?",
+                            (*fields, record_id, dog_id),
+                        )
+                        self.json_response(200, {"ok": True})
                         return
                     if method == "PUT" and section is None:
                         name = clean_text(data.get("name"), "강아지 이름", 50)
@@ -561,7 +665,7 @@ class AppHandler(BaseHTTPRequestHandler):
                         return
                     if section in RECORD_KINDS and method == "GET":
                         rows = db.execute(
-                            "SELECT r.id,r.value,r.detail,r.recorded_at,r.dose_index,r.feeding_method,r.memo,u.name AS caregiver "
+                            "SELECT r.id,r.kind,r.value,r.detail,r.recorded_at,r.dose_index,r.feeding_method,r.memo,u.name AS caregiver "
                             "FROM records r JOIN users u ON u.id=r.user_id "
                             "WHERE r.dog_id=? AND r.kind=? ORDER BY r.recorded_at",
                             (dog_id, section),
@@ -569,63 +673,18 @@ class AppHandler(BaseHTTPRequestHandler):
                         self.json_response(200, {"records": [dict(row) for row in rows]})
                         return
                     if section in RECORD_KINDS and method == "POST":
-                        recorded_at = valid_recorded_at(data.get("recorded_at"))
-                        value = None
-                        dose_index = None
-                        detail = clean_text(data.get("detail", ""), "메모", 200, allow_empty=True)
-                        memo = clean_text(data.get("memo", ""), "메모", 200, allow_empty=True)
-                        feeding_method = "assisted"
-                        if section == "temperature":
-                            try:
-                                value = float(data.get("value"))
-                            except (TypeError, ValueError) as exc:
-                                raise ValueError("체온을 숫자로 입력해 주세요.") from exc
-                            if not 30 <= value <= 45:
-                                raise ValueError("체온은 30~45°C 범위로 입력해 주세요.")
-                            value = round(value, 1)
-                        elif section == "feeding":
-                            try:
-                                value = float(data.get("value"))
-                            except (TypeError, ValueError) as exc:
-                                raise ValueError("급여량을 숫자로 입력해 주세요.") from exc
-                            if not 0.1 <= value <= 2000:
-                                raise ValueError("급여량은 0.1~2,000ml 범위로 입력해 주세요.")
-                            value = round(value, 1)
-                            feeding_method = data.get("feeding_method", "assisted")
-                            if feeding_method not in ("assisted", "self"):
-                                raise ValueError("식사 방법을 선택해 주세요.")
-                        elif section == "hydration":
-                            try:
-                                value = float(data.get("value"))
-                            except (TypeError, ValueError) as exc:
-                                raise ValueError("음수량을 숫자로 입력해 주세요.") from exc
-                            if not 0.1 <= value <= 2000:
-                                raise ValueError("음수량은 0.1~2,000ml 범위로 입력해 주세요.")
-                            value = round(value, 1)
-                        elif section == "medication":
-                            try:
-                                dose_index = int(data.get("dose_index"))
-                            except (TypeError, ValueError) as exc:
-                                raise ValueError("복약 회차를 선택해 주세요.") from exc
-                            if dose_index not in (1, 2, 3):
-                                raise ValueError("복약 회차를 선택해 주세요.")
-                        elif section == "elimination":
-                            if detail not in ("소변", "대변"):
-                                raise ValueError("소변 또는 대변을 선택해 주세요.")
-                        elif section == "vitality":
-                            try:
-                                value = int(data.get("value"))
-                            except (TypeError, ValueError) as exc:
-                                raise ValueError("활력 상태를 선택해 주세요.") from exc
-                            if value not in (1, 2, 3):
-                                raise ValueError("활력 상태를 선택해 주세요.")
-                            detail = {1: "좋음", 2: "보통", 3: "나쁨"}[value]
-                        else:
-                            memo = ""
+                        fields = validated_record_fields(section, data)
+                        if section == "weight":
+                            same_day = db.execute(
+                                "SELECT recorded_at FROM records WHERE dog_id=? AND kind='weight'",
+                                (dog_id,),
+                            ).fetchall()
+                            if any(korea_record_date(item["recorded_at"]) == korea_record_date(fields[0]) for item in same_day):
+                                raise ValueError("몸무게는 하루에 한 번만 기록할 수 있어요.")
                         db.execute(
                             "INSERT INTO records(dog_id,user_id,kind,value,detail,recorded_at,dose_index,created_at,feeding_method,memo) "
                             "VALUES(?,?,?,?,?,?,?,?,?,?)",
-                            (dog_id, user["id"], section, value, detail, recorded_at, dose_index, now_iso(), feeding_method, memo),
+                            (dog_id, user["id"], section, fields[1], fields[2], fields[0], fields[3], now_iso(), fields[4], fields[5]),
                         )
                         self.json_response(201, {"ok": True})
                         return

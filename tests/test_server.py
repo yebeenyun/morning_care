@@ -218,6 +218,145 @@ class SharedCareApiTests(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertIn("30~45", error["error"])
 
+    def test_all_record_kinds_can_be_updated_with_scope_and_validation(self):
+        self.register(self.owner, "민지", "record-edit@example.com")
+        _, profile = self.request(self.owner, "/api/me")
+        dog_id = profile["dogs"][0]["id"]
+        recorded_at = datetime.now().astimezone().isoformat(timespec="minutes")
+        cases = {
+            "temperature": (
+                {"value": 39.1, "recorded_at": recorded_at},
+                {"value": 38.6, "recorded_at": recorded_at},
+                lambda record: self.assertEqual(record["value"], 38.6),
+            ),
+            "feeding": (
+                {"value": 20, "feeding_method": "assisted", "detail": "처방식", "recorded_at": recorded_at},
+                {"value": 25, "feeding_method": "self", "detail": "잘 먹음", "recorded_at": recorded_at},
+                lambda record: self.assertEqual(
+                    (record["value"], record["feeding_method"], record["detail"]),
+                    (25, "self", "잘 먹음"),
+                ),
+            ),
+            "hydration": (
+                {"value": 30, "recorded_at": recorded_at},
+                {"value": 45.5, "recorded_at": recorded_at},
+                lambda record: self.assertEqual(record["value"], 45.5),
+            ),
+            "medication": (
+                {"dose_index": 1, "detail": "식후 복용", "recorded_at": recorded_at},
+                {"dose_index": 3, "detail": "저녁 복용", "recorded_at": recorded_at},
+                lambda record: self.assertEqual(
+                    (record["dose_index"], record["detail"]),
+                    (3, "저녁 복용"),
+                ),
+            ),
+            "elimination": (
+                {"detail": "소변", "recorded_at": recorded_at},
+                {"detail": "대변", "recorded_at": recorded_at},
+                lambda record: self.assertEqual(record["detail"], "대변"),
+            ),
+            "vitality": (
+                {"value": 1, "memo": "좋음", "recorded_at": recorded_at},
+                {"value": 3, "memo": "토함", "recorded_at": recorded_at},
+                lambda record: self.assertEqual(
+                    (record["value"], record["detail"], record["memo"]),
+                    (3, "나쁨", "토함"),
+                ),
+            ),
+        }
+
+        for kind, (initial, replacement, assert_updated) in cases.items():
+            with self.subTest(kind=kind):
+                status, _ = self.request(self.owner, f"/api/dogs/{dog_id}/{kind}", "POST", initial)
+                self.assertEqual(status, 201)
+                status, response = self.request(self.owner, f"/api/dogs/{dog_id}/{kind}")
+                self.assertEqual(status, 200)
+                record_id = max(response["records"], key=lambda item: item["id"])["id"]
+                status, result = self.request(
+                    self.owner,
+                    f"/api/dogs/{dog_id}/records/{record_id}",
+                    "PUT",
+                    replacement,
+                )
+                self.assertEqual(status, 200, result)
+                _, updated = self.request(self.owner, f"/api/dogs/{dog_id}/{kind}")
+                record = next(item for item in updated["records"] if item["id"] == record_id)
+                assert_updated(record)
+
+        _, temperature_records = self.request(self.owner, f"/api/dogs/{dog_id}/temperature")
+        record_id = max(temperature_records["records"], key=lambda item: item["id"])["id"]
+        status, error = self.request(self.owner, f"/api/dogs/{dog_id}/records/{record_id}", "PUT", {
+            "value": 50,
+            "recorded_at": recorded_at,
+        })
+        self.assertEqual(status, 400)
+        self.assertIn("30~45", error["error"])
+
+        self.request(self.owner, "/api/dogs", "POST", {
+            "name": "다른 강아지",
+            "birth_year": 2020,
+        })
+        _, profile = self.request(self.owner, "/api/me")
+        other_dog_id = next(dog["id"] for dog in profile["dogs"] if dog["id"] != dog_id)
+        self.request(self.owner, f"/api/dogs/{other_dog_id}/temperature", "POST", {
+            "value": 38.5,
+            "recorded_at": recorded_at,
+        })
+        _, other_records = self.request(self.owner, f"/api/dogs/{other_dog_id}/temperature")
+        other_record_id = max(other_records["records"], key=lambda item: item["id"])["id"]
+        status, error = self.request(self.owner, f"/api/dogs/{dog_id}/records/{other_record_id}", "PUT", {
+            "value": 38.5,
+            "recorded_at": recorded_at,
+        })
+        self.assertEqual(status, 404)
+        self.assertIn("기록", error["error"])
+
+    def test_weight_records_are_seeded_and_limited_to_one_per_korean_calendar_day(self):
+        self.register(self.owner, "민지", "weight-records@example.com")
+        _, profile = self.request(self.owner, "/api/me")
+        dog_id = profile["dogs"][0]["id"]
+        status, response = self.request(self.owner, f"/api/dogs/{dog_id}/weight")
+        self.assertEqual(status, 200)
+        seeded = {
+            datetime.fromisoformat(record["recorded_at"]).astimezone(server.KOREA_TIME).date().isoformat(): record["value"]
+            for record in response["records"]
+        }
+        self.assertEqual(seeded, {"2026-10-07": 6.1, "2026-10-08": 6.2})
+        previous_day = next(
+            record for record in response["records"]
+            if datetime.fromisoformat(record["recorded_at"]).astimezone(server.KOREA_TIME).date().isoformat() == "2026-10-07"
+        )
+        status, _ = self.request(self.owner, f"/api/dogs/{dog_id}/records/{previous_day['id']}", "PUT", {
+            "value": 6.15,
+            "recorded_at": "2026-10-07T12:00:00+09:00",
+        })
+        self.assertEqual(status, 200)
+        status, error = self.request(self.owner, f"/api/dogs/{dog_id}/records/{previous_day['id']}", "PUT", {
+            "value": 6.15,
+            "recorded_at": "2026-10-08T12:00:00+09:00",
+        })
+        self.assertEqual(status, 400)
+        self.assertIn("하루에 한 번", error["error"])
+
+        status, error = self.request(self.owner, f"/api/dogs/{dog_id}/weight", "POST", {
+            "value": 6.3,
+            "recorded_at": "2026-10-08T18:00:00+09:00",
+        })
+        self.assertEqual(status, 400)
+        self.assertIn("하루에 한 번", error["error"])
+
+        status, _ = self.request(self.owner, f"/api/dogs/{dog_id}/weight", "POST", {
+            "value": 6.0,
+            "recorded_at": "2026-10-06T09:00:00+09:00",
+        })
+        self.assertEqual(status, 201)
+        status, error = self.request(self.owner, f"/api/dogs/{dog_id}/weight", "POST", {
+            "value": 6.1,
+            "recorded_at": "2026-10-06T20:00:00+09:00",
+        })
+        self.assertEqual(status, 400)
+        self.assertIn("하루에 한 번", error["error"])
+
     def test_pwa_assets_are_served_with_installable_content_types(self):
         for path, expected_type in [
             ("/manifest.json", "application/manifest+json"),
@@ -321,7 +460,7 @@ class SharedCareApiTests(unittest.TestCase):
                             "SELECT COUNT(*) FROM records WHERE dog_id=?",
                             (dogs[0]["id"],),
                         ).fetchone()[0],
-                        14,
+                        16,
                     )
                     self.assertEqual(
                         db.execute(
@@ -370,6 +509,7 @@ class SharedCareApiTests(unittest.TestCase):
                     self.assertEqual(counts["temperature"], 7)
                     self.assertEqual(counts["elimination"], 2)
                     self.assertEqual(counts["feeding"], 4)
+                    self.assertEqual(counts["weight"], 2)
                     feeding_methods = db.execute(
                         "SELECT recorded_at,feeding_method FROM records WHERE dog_id=1 AND kind='feeding' "
                         "ORDER BY recorded_at"
@@ -391,6 +531,7 @@ class SharedCareApiTests(unittest.TestCase):
                         "SELECT sql FROM sqlite_master WHERE type='table' AND name='records'"
                     ).fetchone()["sql"]
                     self.assertIn("'hydration'", records_schema)
+                    self.assertIn("'weight'", records_schema)
                     self.assertIn("memo TEXT NOT NULL DEFAULT ''", records_schema)
             finally:
                 server.DB_PATH = previous_db_path
