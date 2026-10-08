@@ -1,4 +1,4 @@
-const CACHE_NAME = "morning-care-shell-v3";
+const CACHE_NAME = "morning-care-shell-v6";
 const APP_SHELL = [
   "/",
   "/index.html",

@@ -134,6 +134,7 @@ class SharedCareApiTests(unittest.TestCase):
         self.assertEqual(status, 201)
         status, _ = self.request(self.caregiver, f"/api/dogs/{dog['id']}/feeding", "POST", {
             "value": 25,
+            "feeding_method": "self",
             "detail": "처방식",
             "recorded_at": recorded_at,
         })
@@ -151,6 +152,7 @@ class SharedCareApiTests(unittest.TestCase):
         status, records = self.request(self.owner, f"/api/dogs/{dog['id']}/feeding")
         self.assertEqual(status, 200)
         self.assertTrue(any(item["value"] == 25 and item["caregiver"] == "서준" for item in records["records"]))
+        self.assertTrue(any(item["value"] == 25 and item["feeding_method"] == "self" for item in records["records"]))
         status, records = self.request(self.owner, f"/api/dogs/{dog['id']}/medication")
         self.assertEqual(status, 200)
         self.assertTrue(any(item["dose_index"] == 1 and item["caregiver"] == "서준" for item in records["records"]))
@@ -161,15 +163,33 @@ class SharedCareApiTests(unittest.TestCase):
         self.assertEqual(status, 201)
         status, _ = self.request(self.caregiver, f"/api/dogs/{dog['id']}/vitality", "POST", {
             "value": 1,
+            "memo": "식욕이 돌아옴",
             "recorded_at": recorded_at,
         })
         self.assertEqual(status, 201)
         status, records = self.request(self.owner, f"/api/dogs/{dog['id']}/vitality")
         self.assertEqual(status, 200)
-        self.assertTrue(any(item["value"] == 1 and item["detail"] == "좋음" for item in records["records"]))
+        self.assertTrue(any(
+            item["value"] == 1 and item["detail"] == "좋음" and item["memo"] == "식욕이 돌아옴"
+            for item in records["records"]
+        ))
         status, records = self.request(self.owner, f"/api/dogs/{dog['id']}/elimination")
         self.assertEqual(status, 200)
         self.assertTrue(any(item["detail"] == "소변" for item in records["records"]))
+        status, _ = self.request(self.caregiver, f"/api/dogs/{dog['id']}/hydration", "POST", {
+            "value": 35.5,
+            "recorded_at": recorded_at,
+        })
+        self.assertEqual(status, 201)
+        status, records = self.request(self.owner, f"/api/dogs/{dog['id']}/hydration")
+        self.assertEqual(status, 200)
+        self.assertTrue(any(item["value"] == 35.5 and item["caregiver"] == "서준" for item in records["records"]))
+        status, result = self.request(self.caregiver, f"/api/dogs/{dog['id']}/hydration", "POST", {
+            "value": 0,
+            "recorded_at": recorded_at,
+        })
+        self.assertEqual(status, 400)
+        self.assertIn("음수량", result["error"])
 
     def test_signup_with_invitation_joins_without_creating_another_sample_dog(self):
         self.register(self.owner, "민지", "invitation-owner@example.com")
@@ -350,6 +370,12 @@ class SharedCareApiTests(unittest.TestCase):
                     self.assertEqual(counts["temperature"], 7)
                     self.assertEqual(counts["elimination"], 2)
                     self.assertEqual(counts["feeding"], 4)
+                    feeding_methods = db.execute(
+                        "SELECT recorded_at,feeding_method FROM records WHERE dog_id=1 AND kind='feeding' "
+                        "ORDER BY recorded_at"
+                    ).fetchall()
+                    self.assertEqual([row["feeding_method"] for row in feeding_methods], ["assisted", "assisted", "assisted", "self"])
+                    self.assertNotIn("hydration", counts)
                     self.assertEqual(counts["medication"], 2)
                     self.assertEqual(
                         db.execute("SELECT detail FROM records WHERE id=1").fetchone()["detail"],
@@ -361,6 +387,11 @@ class SharedCareApiTests(unittest.TestCase):
                     )
                     self.assertIn("role", {row["name"] for row in db.execute("PRAGMA table_info(users)")})
                     self.assertEqual(db.execute("SELECT role FROM users WHERE id=1").fetchone()["role"], "user")
+                    records_schema = db.execute(
+                        "SELECT sql FROM sqlite_master WHERE type='table' AND name='records'"
+                    ).fetchone()["sql"]
+                    self.assertIn("'hydration'", records_schema)
+                    self.assertIn("memo TEXT NOT NULL DEFAULT ''", records_schema)
             finally:
                 server.DB_PATH = previous_db_path
 

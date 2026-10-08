@@ -8,6 +8,7 @@ const state = {
   tab: "home",
   temperature: [],
   feeding: [],
+  hydration: [],
   medication: [],
   elimination: [],
   vitality: [],
@@ -22,6 +23,7 @@ const tabInfo = {
   home: ["오늘의 케어", "주모닝의 하루", "오늘도 함께, 천천히 건강을 챙겨봐요."],
   temperature: ["체온 기록", "체온을 살펴봐요", "기록을 이어가면 작은 변화도 놓치지 않아요."],
   feeding: ["식사 기록", "오늘의 식사", "먹은 시간과 양을 한눈에 확인해요."],
+  hydration: ["음수량 기록", "오늘의 음수량", "물을 마신 시간과 양을 기록해요."],
   medication: ["약 복용", "약 먹을 시간이에요", "8시간 간격으로 하루 세 번, 꼼꼼하게 챙겨요."],
   elimination: ["소변 · 대변", "배변 기록을 남겨요", "소변과 대변을 기록해 배설 패턴을 확인해요."],
   vitality: ["활력 징후", "오늘의 활력 징후", "그날의 전반적인 컨디션을 세 단계로 기록해요."],
@@ -185,8 +187,8 @@ function renderEmptyDogs() {
 
 async function loadRecords() {
   const id = state.dog.id;
-  [state.temperature, state.feeding, state.medication, state.elimination, state.vitality] = await Promise.all(
-    ["temperature", "feeding", "medication", "elimination", "vitality"].map(async (kind) => (await api(`/api/dogs/${id}/${kind}`)).records),
+  [state.temperature, state.feeding, state.hydration, state.medication, state.elimination, state.vitality] = await Promise.all(
+    ["temperature", "feeding", "hydration", "medication", "elimination", "vitality"].map(async (kind) => (await api(`/api/dogs/${id}/${kind}`)).records),
   );
 }
 
@@ -215,6 +217,7 @@ function render() {
     home: homeTemplate,
     temperature: temperatureTemplate,
     feeding: feedingTemplate,
+    hydration: hydrationTemplate,
     medication: medicationTemplate,
     elimination: eliminationTemplate,
     vitality: vitalityTemplate,
@@ -247,16 +250,18 @@ function renderAdmin() {
   });
   const kindNames = {
     temperature: "체온",
-    feeding: "강급",
+    feeding: "식사",
+    hydration: "음수량",
     medication: "복약",
     elimination: "소변·대변",
     vitality: "활력 징후",
   };
   const recordValue = (record) => {
     if (record.kind === "temperature") return `${record.value}°C`;
-    if (record.kind === "feeding") return `${record.value}ml`;
+    if (record.kind === "feeding") return `${record.value}ml · ${record.feeding_method === "self" ? "스스로 먹음" : "밥 강급"}`;
+    if (record.kind === "hydration") return `${record.value}ml`;
     if (record.kind === "medication") return `${record.dose_index}회차 복용`;
-    if (record.kind === "vitality") return `${escapeHTML(record.detail)} (${record.value}/3)`;
+    if (record.kind === "vitality") return `${escapeHTML(record.detail)} (${record.value}/3)${record.memo ? ` · ${escapeHTML(record.memo)}` : ""}`;
     return escapeHTML(record.detail);
   };
   $("#breadcrumbName").textContent = "전체 데이터";
@@ -300,6 +305,7 @@ function todayRecords(records) {
 function homeTemplate() {
   const temps = [...state.temperature].sort((a, b) => b.recorded_at.localeCompare(a.recorded_at));
   const meals = todayRecords(state.feeding).sort((a, b) => a.recorded_at.localeCompare(b.recorded_at));
+  const drinks = todayRecords(state.hydration);
   const todayMeds = todayRecords(state.medication);
   const mealTotal = meals.reduce((total, record) => total + Number(record.value || 0), 0);
   const latestTemp = temps[0];
@@ -316,11 +322,17 @@ function homeTemplate() {
       ? medDates[upcomingDose].toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit", hour12: false })
       : "복용 확인 필요";
   const timeline = [
-    ...meals.map((record) => ({ time: record.recorded_at, title: "밥 강급", detail: record.detail || "식사 기록", value: `${record.value}ml` })),
+    ...meals.map((record) => ({
+      time: record.recorded_at,
+      title: record.feeding_method === "self" ? "스스로 먹음" : "밥 강급",
+      detail: record.detail || "식사 기록",
+      value: `${record.value}ml`,
+    })),
+    ...drinks.map((record) => ({ time: record.recorded_at, title: "물 마심", detail: "음수량 기록", value: `${record.value}ml` })),
     ...todayMeds.map((record) => ({ time: record.recorded_at, title: `${record.dose_index}회차 약 복용`, detail: record.detail || "복약 완료", value: "완료" })),
     ...(latestTemp && dateParts(new Date(latestTemp.recorded_at)).date === dateParts().date ? [{ time: latestTemp.recorded_at, title: "체온 측정", detail: "건강 체크", value: `${latestTemp.value}°C` }] : []),
     ...todayRecords(state.elimination).map((record) => ({ time: record.recorded_at, title: record.detail, detail: "배변 기록", value: record.detail === "소변" ? "💧" : "✓" })),
-    ...todayRecords(state.vitality).map((record) => ({ time: record.recorded_at, title: `활력 징후 · ${vitalityStates[record.value]?.label || "기록"}`, detail: vitalityStates[record.value]?.description || "컨디션 기록", value: `${record.value}/3` })),
+    ...todayRecords(state.vitality).map((record) => ({ time: record.recorded_at, title: `활력 징후 · ${vitalityStates[record.value]?.label || "기록"}`, detail: [vitalityStates[record.value]?.description, record.memo].filter(Boolean).join(" · ") || "컨디션 기록", value: `${record.value}/3` })),
   ].sort((a, b) => b.time.localeCompare(a.time)).slice(0, 4);
   return `<div class="dashboard-grid">
     <div class="column-stack">
@@ -344,38 +356,71 @@ function homeTemplate() {
   </div>`;
 }
 
-function chartTemplate(records, unit, minValue, maxValue) {
-  const sorted = [...records].sort((a, b) => a.recorded_at.localeCompare(b.recorded_at)).slice(-8);
+function chartTemplate(records, unit, minValue, maxValue, metricName = unit === "°C" ? "체온" : "급여량") {
+  const allSorted = [...records]
+    .filter((record) => Number.isFinite(Date.parse(record.recorded_at)))
+    .sort((a, b) => Date.parse(a.recorded_at) - Date.parse(b.recorded_at));
   const width = 620;
   const height = 198;
   const left = 42;
   const right = 12;
   const top = 15;
   const bottom = 25;
+  const plotWidth = width - left - right;
+  const allMedicationSorted = state.medication
+    .filter((record) => Number.isFinite(Date.parse(record.recorded_at)))
+    .sort((a, b) => Date.parse(a.recorded_at) - Date.parse(b.recorded_at));
+  const timeEnd = allSorted.length
+    ? Math.max(Date.parse(allSorted.at(-1).recorded_at), Date.parse(allMedicationSorted.at(-1)?.recorded_at || allSorted.at(-1).recorded_at))
+    : null;
+  const timeStart = timeEnd === null ? null : timeEnd - 24 * 60 * 60 * 1000;
+  const timeSpan = timeEnd === null ? 0 : timeEnd - timeStart;
+  const sorted = allSorted
+    .filter((record) => Date.parse(record.recorded_at) >= timeStart)
+    .slice(-8);
+  const medicationRecords = allMedicationSorted.filter((record) => {
+    const timestamp = Date.parse(record.recorded_at);
+    return timeStart !== null && Number.isFinite(timestamp) && timestamp >= timeStart && timestamp <= timeEnd;
+  });
   const values = sorted.map((record) => Number(record.value));
   const min = Math.min(minValue, ...values);
   const max = Math.max(maxValue, ...values);
   const yMin = unit === "°C" ? Math.min(37, Math.floor((min - 0.3) * 2) / 2) : 0;
   const yMax = unit === "°C" ? Math.max(40, Math.ceil((max + 0.3) * 2) / 2) : Math.max(30, Math.ceil(max / 10) * 10);
-  const x = (index) => left + (sorted.length < 2 ? 0 : index * (width - left - right) / (sorted.length - 1));
+  const x = (record) => left + (timeSpan > 0 ? (Date.parse(record.recorded_at) - timeStart) / timeSpan * plotWidth : plotWidth / 2);
   const y = (value) => top + (yMax - value) / (yMax - yMin) * (height - top - bottom);
-  const points = sorted.map((record, index) => `${x(index)},${y(Number(record.value))}`).join(" ");
-  const area = sorted.length ? `${left},${height - bottom} ${points} ${x(sorted.length - 1)},${height - bottom}` : "";
+  const points = sorted.map((record) => `${x(record)},${y(Number(record.value))}`).join(" ");
+  const area = sorted.length ? `${left},${height - bottom} ${points} ${x(sorted.at(-1))},${height - bottom}` : "";
+  const tickCount = timeEnd === null ? 0 : 5;
+  const xTicks = Array.from({ length: tickCount }, (_, index) => {
+    const timestamp = timeStart + (tickCount > 1 ? timeSpan * index / (tickCount - 1) : 0);
+    const date = new Date(timestamp);
+    const time = date.toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit", hour12: false });
+    const label = new Date(timeStart).toDateString() !== new Date(timeEnd).toDateString()
+      ? `${date.getMonth() + 1}/${date.getDate()} ${time}`
+      : time;
+    return { x: left + (timestamp - timeStart) / timeSpan * plotWidth, label };
+  });
   const gridVals = unit === "°C"
     ? Array.from({ length: Math.floor((yMax - yMin) * 2) + 1 }, (_, index) => yMin + index * 0.5)
     : [0, Math.round(yMax / 3), Math.round(yMax * 2 / 3), yMax];
-  return `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="시간에 따른 ${unit === "°C" ? "체온" : "급여량"} 그래프">
+  return `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="시간에 따른 ${metricName} 그래프">
     <defs><linearGradient id="areaFill" x1="0" x2="0" y1="0" y2="1"><stop offset="0%" stop-color="#91a287" stop-opacity=".24"/><stop offset="100%" stop-color="#91a287" stop-opacity="0"/></linearGradient></defs>
     ${gridVals.map((value) => `<line class="chart-grid" x1="${left}" y1="${y(value)}" x2="${width-right}" y2="${y(value)}"/><text class="chart-text" x="0" y="${y(value)+3}">${value}${unit}</text>`).join("")}
+    ${xTicks.map((tick) => `<line class="chart-x-grid" x1="${tick.x}" y1="${top}" x2="${tick.x}" y2="${height-bottom}"/><text class="chart-text" text-anchor="middle" x="${tick.x}" y="${height-5}">${tick.label}</text>`).join("")}
     ${unit === "°C" ? `<line class="chart-limit chart-limit-low" x1="${left}" y1="${y(37.5)}" x2="${width-right}" y2="${y(37.5)}"/><text class="chart-limit-label chart-limit-label-low" x="${width-right-2}" y="${y(37.5)-4}" text-anchor="end">LIMIT L 37.5°C</text><line class="chart-limit chart-limit-high" x1="${left}" y1="${y(39.2)}" x2="${width-right}" y2="${y(39.2)}"/><text class="chart-limit-label chart-limit-label-high" x="${width-right-2}" y="${y(39.2)-4}" text-anchor="end">LIMIT H 39.2°C</text>` : ""}
-    ${sorted.length ? `<polygon class="chart-area" points="${area}"/><polyline class="chart-line" points="${points}"/>${sorted.map((record, index) => `<circle class="chart-dot" cx="${x(index)}" cy="${y(Number(record.value))}" r="4"><title>${formatDateTime(record.recorded_at)} ${record.value}${unit}</title></circle><text class="chart-text" text-anchor="middle" x="${x(index)}" y="${height-5}">${formatTime(record.recorded_at)}</text>`).join("")}` : `<text class="chart-text" x="${width/2}" y="${height/2}" text-anchor="middle">기록을 추가하면 그래프가 표시돼요</text>`}
+    ${sorted.length ? `<polygon class="chart-area" points="${area}"/><polyline class="chart-line" points="${points}"/>${sorted.map((record) => `<circle class="chart-dot" cx="${x(record)}" cy="${y(Number(record.value))}" r="4"><title>${formatDateTime(record.recorded_at)} ${record.value}${unit}</title></circle>`).join("")}` : `<text class="chart-text" x="${width/2}" y="${height/2}" text-anchor="middle">기록을 추가하면 그래프가 표시돼요</text>`}
+    ${medicationRecords.map((record) => {
+      const medicationX = left + (Date.parse(record.recorded_at) - timeStart) / timeSpan * plotWidth;
+      return `<line class="chart-medication-line" x1="${medicationX}" y1="${top}" x2="${medicationX}" y2="${height-bottom}"><title>${formatDateTime(record.recorded_at)} 약 ${record.dose_index}회 복용</title></line><text class="chart-medication-label" text-anchor="middle" x="${medicationX}" y="${top+10}">약 ${record.dose_index}회</text>`;
+    }).join("")}
   </svg>`;
 }
 
 function recordListTemplate(records, unit, emptyMessage) {
   const sorted = [...records].sort((a, b) => b.recorded_at.localeCompare(a.recorded_at));
   if (!sorted.length) return `<div class="empty-state">${emptyMessage}</div>`;
-  return `<div class="record-list">${sorted.slice(0, 12).map((record) => `<div class="record-row"><span><strong>${formatDateTime(record.recorded_at)}${record.detail ? ` · ${escapeHTML(record.detail)}` : ""}</strong><small>${escapeHTML(record.caregiver)} 보호자가 기록</small></span><span class="record-number">${unit === " " ? "" : `${record.value}${unit}`}</span></div>`).join("")}</div>`;
+  return `<div class="record-list">${sorted.slice(0, 12).map((record) => `<div class="record-row"><span><strong>${formatDateTime(record.recorded_at)}${record.kind === "feeding" ? ` · ${record.feeding_method === "self" ? "스스로 먹음" : "밥 강급"}` : ""}${record.detail ? ` · ${escapeHTML(record.detail)}` : ""}${record.memo ? ` · ${escapeHTML(record.memo)}` : ""}</strong><small>${escapeHTML(record.caregiver)} 보호자가 기록</small></span><span class="record-number">${unit === " " ? "" : `${record.value}${unit}`}</span></div>`).join("")}</div>`;
 }
 
 function temperatureTemplate() {
@@ -383,7 +428,7 @@ function temperatureTemplate() {
   const recent = sorted[0];
   const values = state.temperature.map((item) => Number(item.value));
   const avg = values.length ? (values.reduce((a, b) => a + b, 0) / values.length).toFixed(1) : "--";
-  return `<div class="detail-grid"><div class="card chart-card"><div class="section-head"><div><h2>체온 변화</h2><div class="metric-caption">시간에 따른 체온을 확인해요</div></div><span class="soft-tag">최근 8회</span></div><div class="metric-big">${recent ? recent.value : "--"}<small> °C</small></div><div class="metric-caption">${recent ? `${formatDateTime(recent.recorded_at)} 측정` : "첫 체온 기록을 추가해 보세요"}</div><div class="chart-wrap">${chartTemplate(state.temperature, "°C", 37, 40)}</div><div class="chart-legend temperature-legend"><span><i class="legend-dot"></i>체온</span><span><i class="limit-swatch"></i>하한 37.5°C</span><span><i class="limit-swatch high"></i>상한 39.2°C</span></div></div>
+  return `<div class="detail-grid"><div class="card chart-card"><div class="section-head"><div><h2>체온 변화</h2><div class="metric-caption">시간에 따른 체온을 확인해요</div></div><span class="soft-tag">최근 8회</span></div><div class="metric-big">${recent ? recent.value : "--"}<small> °C</small></div><div class="metric-caption">${recent ? `${formatDateTime(recent.recorded_at)} 측정` : "첫 체온 기록을 추가해 보세요"}</div><div class="chart-wrap">${chartTemplate(state.temperature, "°C", 37, 40)}</div><div class="chart-legend temperature-legend"><span><i class="legend-dot"></i>체온</span><span><i class="limit-swatch"></i>하한 37.5°C</span><span><i class="limit-swatch high"></i>상한 39.2°C</span><span><i class="medication-swatch"></i>약 복용</span></div></div>
     <section class="card detail-card"><div class="section-head"><h2>측정 기록</h2><span class="soft-tag">평균 ${avg}°C</span></div>${recordListTemplate(state.temperature, "°C", "아직 체온 기록이 없어요.")}</section></div>`;
 }
 
@@ -391,15 +436,25 @@ function feedingTemplate() {
   const meals = todayRecords(state.feeding).sort((a, b) => a.recorded_at.localeCompare(b.recorded_at));
   const total = meals.reduce((sum, record) => sum + Number(record.value || 0), 0);
   const average = meals.length ? `${(total / meals.length).toFixed(1)}ml` : "—";
-  return `<div class="detail-grid"><div class="card chart-card"><div class="section-head"><div><h2>강급 기록</h2><div class="metric-caption">시간별로 먹은 양을 확인해요</div></div><span class="soft-tag">최근 8회</span></div><div class="food-total"><span class="food-bowl">🥣</span><div><strong>${total}ml</strong><small>오늘 총 급여량 · ${meals.length}회</small></div></div><div class="chart-wrap">${chartTemplate(state.feeding, "ml", 0, Math.max(30, ...state.feeding.map((record) => Number(record.value))))}</div><div class="chart-legend"><span class="legend-dot"></span>급여량 · 1회 평균 ${average}</div></div>
-    <section class="card detail-card"><div class="section-head"><h2>오늘 먹은 시간</h2><span class="soft-tag">${meals.length}회</span></div>${meals.length ? `<div class="record-list">${[...meals].reverse().map((record) => `<div class="record-row"><span><strong>${formatTime(record.recorded_at)}${record.detail ? ` · ${escapeHTML(record.detail)}` : ""}</strong><small>${escapeHTML(record.caregiver)} 보호자가 기록</small></span><span class="record-number">${record.value}ml</span></div>`).join("")}</div>` : `<div class="empty-state">오늘의 식사 기록이 아직 없어요.</div>`}<div class="section-head" style="margin-top:14px"><h2>전체 급여 기록</h2></div>${recordListTemplate([...state.feeding].reverse().slice(0,5), "ml", "아직 급여 기록이 없어요.")}</section></div>`;
+  const assistedCount = meals.filter((record) => record.feeding_method !== "self").length;
+  const selfCount = meals.length - assistedCount;
+  return `<div class="detail-grid"><div class="card chart-card"><div class="section-head"><div><h2>식사 기록</h2><div class="metric-caption">강급과 스스로 먹은 양을 함께 확인해요</div></div><span class="soft-tag">최근 8회</span></div><div class="food-total"><span class="food-bowl">🥣</span><div><strong>${total}ml</strong><small>오늘 총 식사량 · 강급 ${assistedCount}회 · 스스로 ${selfCount}회</small></div></div><div class="chart-wrap">${chartTemplate(state.feeding, "ml", 0, Math.max(30, ...state.feeding.map((record) => Number(record.value))))}</div><div class="chart-legend"><span class="legend-dot"></span>식사량 · 1회 평균 ${average}<span><i class="medication-swatch"></i>약 복용</span></div></div>
+    <section class="card detail-card"><div class="section-head"><h2>오늘 먹은 시간</h2><span class="soft-tag">${meals.length}회</span></div>${meals.length ? `<div class="record-list">${[...meals].reverse().map((record) => `<div class="record-row"><span><strong>${formatTime(record.recorded_at)} · ${record.feeding_method === "self" ? "스스로 먹음" : "밥 강급"}${record.detail ? ` · ${escapeHTML(record.detail)}` : ""}</strong><small>${escapeHTML(record.caregiver)} 보호자가 기록</small></span><span class="record-number">${record.value}ml</span></div>`).join("")}</div>` : `<div class="empty-state">오늘의 식사 기록이 아직 없어요.</div>`}<div class="section-head" style="margin-top:14px"><h2>전체 식사 기록</h2></div>${recordListTemplate([...state.feeding].reverse().slice(0,5), "ml", "아직 식사 기록이 없어요.")}</section></div>`;
+}
+
+function hydrationTemplate() {
+  const drinks = todayRecords(state.hydration).sort((a, b) => a.recorded_at.localeCompare(b.recorded_at));
+  const total = drinks.reduce((sum, record) => sum + Number(record.value || 0), 0);
+  const average = drinks.length ? `${(total / drinks.length).toFixed(1)}ml` : "—";
+  return `<div class="detail-grid"><div class="card chart-card"><div class="section-head"><div><h2>음수량 기록</h2><div class="metric-caption">시간별로 마신 물의 양을 확인해요</div></div><span class="soft-tag">최근 8회</span></div><div class="food-total"><span class="food-bowl">💧</span><div><strong>${total}ml</strong><small>오늘 총 음수량 · ${drinks.length}회</small></div></div><div class="chart-wrap">${chartTemplate(state.hydration, "ml", 0, Math.max(30, ...state.hydration.map((record) => Number(record.value))), "음수량")}</div><div class="chart-legend"><span class="legend-dot"></span>음수량 · 1회 평균 ${average}<span><i class="medication-swatch"></i>약 복용</span></div></div>
+    <section class="card detail-card"><div class="section-head"><h2>오늘 마신 시간</h2><span class="soft-tag">${drinks.length}회</span></div>${drinks.length ? `<div class="record-list">${[...drinks].reverse().map((record) => `<div class="record-row"><span><strong>${formatTime(record.recorded_at)}</strong><small>${escapeHTML(record.caregiver)} 보호자가 기록</small></span><span class="record-number">${record.value}ml</span></div>`).join("")}</div>` : `<div class="empty-state">오늘의 음수량 기록이 아직 없어요.</div>`}<div class="section-head" style="margin-top:14px"><h2>전체 음수량 기록</h2></div>${recordListTemplate([...state.hydration].reverse().slice(0,5), "ml", "아직 음수량 기록이 없어요.")}</section></div>`;
 }
 
 function vitalitySummary() {
   const latest = [...state.vitality].sort((a, b) => b.recorded_at.localeCompare(a.recorded_at))[0];
   if (!latest) return `<div class="empty-state">아직 활력 징후 기록이 없어요.</div>`;
   const status = vitalityStates[latest.value];
-  return `<div class="vitality-current ${status.tone}"><span class="vitality-score">${latest.value}/3</span><span><strong>${status.label}</strong><small>${status.description}</small><small>${formatDateTime(latest.recorded_at)}</small></span></div>`;
+  return `<div class="vitality-current ${status.tone}"><span class="vitality-score">${latest.value}/3</span><span><strong>${status.label}</strong><small>${status.description}</small>${latest.memo ? `<small>메모 · ${escapeHTML(latest.memo)}</small>` : ""}<small>${formatDateTime(latest.recorded_at)}</small></span></div>`;
 }
 
 function eliminationTemplate() {
@@ -414,7 +469,7 @@ function vitalityTemplate() {
   const records = [...state.vitality].sort((a, b) => b.recorded_at.localeCompare(a.recorded_at));
   return `<div class="detail-grid"><section class="card detail-card"><div class="section-head"><div><h2>3단계 활력 징후</h2><div class="metric-caption">기록할 때 아이의 상태와 체온을 함께 확인해요.</div></div></div><div class="vitality-options">
     ${Object.entries(vitalityStates).map(([score, status]) => `<div class="vitality-option ${status.tone}"><span class="vitality-score">${score}</span><span><strong>${status.label}</strong><small>${status.description}</small></span></div>`).join("")}
-  </div></section><section class="card detail-card"><div class="section-head"><h2>활력 기록</h2><span class="soft-tag">${records.length}회</span></div>${records.length ? `<div class="record-list">${records.slice(0,12).map((record) => { const status = vitalityStates[record.value]; return `<div class="record-row"><span><strong>${formatDateTime(record.recorded_at)} · ${status?.label || "활력 기록"}</strong><small>${escapeHTML(status?.description || record.detail)} · ${escapeHTML(record.caregiver)} 보호자</small></span><span class="record-number">${record.value}/3</span></div>`; }).join("")}</div>` : `<div class="empty-state">활력 징후를 기록해 주세요.</div>`}</section></div>`;
+  </div></section><section class="card detail-card"><div class="section-head"><h2>활력 기록</h2><span class="soft-tag">${records.length}회</span></div>${records.length ? `<div class="record-list">${records.slice(0,12).map((record) => { const status = vitalityStates[record.value]; return `<div class="record-row"><span><strong>${formatDateTime(record.recorded_at)} · ${status?.label || "활력 기록"}</strong><small>${escapeHTML(status?.description || record.detail)}${record.memo ? ` · 메모: ${escapeHTML(record.memo)}` : ""} · ${escapeHTML(record.caregiver)} 보호자</small></span><span class="record-number">${record.value}/3</span></div>`; }).join("")}</div>` : `<div class="empty-state">활력 징후를 기록해 주세요.</div>`}</section></div>`;
 }
 
 function medicationTimes() {
@@ -467,10 +522,11 @@ function closeModal() {
 }
 
 function openRecordModal(kind = state.tab) {
-  const selected = ["temperature", "feeding", "medication", "elimination", "vitality"].includes(kind) ? kind : "temperature";
+  const selected = ["temperature", "feeding", "hydration", "medication", "elimination", "vitality"].includes(kind) ? kind : "temperature";
   const settings = {
     temperature: { title: "체온 기록 추가", label: "체온 (°C)", value: "38.5", type: "number", step: "0.1", min: "30", max: "45", placeholder: "예: 38.5" },
     feeding: { title: "밥 강급 기록 추가", label: "급여량 (ml)", value: "", type: "number", step: "0.1", min: "0.1", max: "2000", placeholder: "예: 20" },
+    hydration: { title: "음수량 기록 추가", label: "마신 물의 양 (ml)", value: "", type: "number", step: "0.1", min: "0.1", max: "2000", placeholder: "예: 30" },
   };
   const current = dateParts().datetime;
   if (selected === "elimination") {
@@ -482,6 +538,7 @@ function openRecordModal(kind = state.tab) {
   } else if (selected === "vitality") {
     openModal("활력 징후 기록 추가", "혼자 먹는지, 평소 상태인지, 체온이 높은지 확인해 주세요.", `<form id="recordForm" class="form-grid">
       <div class="field"><label for="vitalityScore">오늘의 상태</label><select id="vitalityScore" name="value">${Object.entries(vitalityStates).map(([score, status]) => `<option value="${score}">${score}. ${status.label} — ${status.description}</option>`).join("")}</select></div>
+      <div class="field"><label for="vitalityMemo">메모 (선택)</label><textarea id="vitalityMemo" name="memo" rows="3" maxlength="200" placeholder="예: 토함, 기침, 식욕 저하"></textarea></div>
       <div class="field"><label for="recordDate">날짜와 시간</label><input id="recordDate" name="recorded_at" type="datetime-local" value="${current}" required></div>
       <div class="form-actions"><button type="button" class="secondary-button cancel-modal">취소</button><button type="submit" class="primary-button">활력 기록 저장</button></div>
     </form>`);
@@ -499,6 +556,7 @@ function openRecordModal(kind = state.tab) {
     openModal(config.title, "기록 시간은 날짜·시·분까지 직접 수정할 수 있어요.", `<form id="recordForm" class="form-grid">
       <div class="field"><label for="recordValue">${config.label}</label><input id="recordValue" name="value" type="${config.type}" inputmode="decimal" min="${config.min}" max="${config.max}" step="${config.step}" value="${config.value}" placeholder="${config.placeholder}" required></div>
       <div class="field"><label for="recordDate">측정 날짜와 시간</label><input id="recordDate" name="recorded_at" type="datetime-local" value="${current}" required></div>
+      ${selected === "feeding" ? `<div class="field"><label for="feedingMethod">먹은 방법</label><select id="feedingMethod" name="feeding_method"><option value="assisted">밥 강급</option><option value="self">스스로 먹음</option></select></div>` : ""}
       ${selected === "feeding" ? `<div class="field"><label for="recordDetail">메모 (선택)</label><input id="recordDetail" name="detail" maxlength="200" placeholder="예: 처방식, 닭가슴살"></div>` : ""}
       <div class="form-actions"><button type="button" class="secondary-button cancel-modal">취소</button><button type="submit" class="primary-button">기록 저장</button></div>
     </form>`);

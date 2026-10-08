@@ -21,7 +21,7 @@ PORT = int(os.environ.get("PORT", "8000"))
 HOST = os.environ.get("HOST", "0.0.0.0")
 SESSION_DAYS = 14
 KOREA_TIME = timezone(timedelta(hours=9))
-RECORD_KINDS = ("temperature", "feeding", "medication", "elimination", "vitality")
+RECORD_KINDS = ("temperature", "feeding", "hydration", "medication", "elimination", "vitality")
 
 
 def connect():
@@ -81,12 +81,15 @@ def initialize():
                 id INTEGER PRIMARY KEY,
                 dog_id INTEGER NOT NULL REFERENCES dogs(id) ON DELETE CASCADE,
                 user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-                kind TEXT NOT NULL CHECK (kind IN ('temperature', 'feeding', 'medication', 'elimination', 'vitality')),
+                kind TEXT NOT NULL CHECK (kind IN ('temperature', 'feeding', 'hydration', 'medication', 'elimination', 'vitality')),
                 value REAL,
                 detail TEXT NOT NULL DEFAULT '',
                 recorded_at TEXT NOT NULL,
                 dose_index INTEGER,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                feeding_method TEXT NOT NULL DEFAULT 'assisted'
+                    CHECK (feeding_method IN ('assisted', 'self')),
+                memo TEXT NOT NULL DEFAULT ''
             );
             CREATE TABLE IF NOT EXISTS seeded_dog_data (
                 dog_id INTEGER PRIMARY KEY REFERENCES dogs(id) ON DELETE CASCADE
@@ -98,24 +101,52 @@ def initialize():
             db.execute(
                 "ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('user', 'admin'))"
             )
+        record_columns = {row["name"] for row in db.execute("PRAGMA table_info(records)")}
+        feeding_method_migration = "feeding_method" not in record_columns
+        memo_migration = "memo" not in record_columns
         schema = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='records'").fetchone()["sql"]
-        if "elimination" not in schema or "vitality" not in schema:
+        if any(f"'{kind}'" not in schema for kind in RECORD_KINDS):
             db.execute("DROP INDEX IF EXISTS records_dog_kind_time")
             db.execute("ALTER TABLE records RENAME TO records_legacy")
+            legacy_columns = {row["name"] for row in db.execute("PRAGMA table_info(records_legacy)")}
+            feeding_method_select = "feeding_method" if "feeding_method" in legacy_columns else "'assisted'"
+            memo_select = "memo" if "memo" in legacy_columns else "''"
             db.execute(
                 "CREATE TABLE records ("
                 "id INTEGER PRIMARY KEY,"
                 "dog_id INTEGER NOT NULL REFERENCES dogs(id) ON DELETE CASCADE,"
                 "user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,"
-                "kind TEXT NOT NULL CHECK (kind IN ('temperature','feeding','medication','elimination','vitality')),"
+                "kind TEXT NOT NULL CHECK (kind IN ('temperature','feeding','hydration','medication','elimination','vitality')),"
                 "value REAL, detail TEXT NOT NULL DEFAULT '', recorded_at TEXT NOT NULL,"
-                "dose_index INTEGER, created_at TEXT NOT NULL)"
+                "dose_index INTEGER, created_at TEXT NOT NULL,"
+                "feeding_method TEXT NOT NULL DEFAULT 'assisted' CHECK (feeding_method IN ('assisted','self')),"
+                "memo TEXT NOT NULL DEFAULT '')"
             )
             db.execute(
-                "INSERT INTO records(id,dog_id,user_id,kind,value,detail,recorded_at,dose_index,created_at) "
-                "SELECT id,dog_id,user_id,kind,value,detail,recorded_at,dose_index,created_at FROM records_legacy"
+                "INSERT INTO records(id,dog_id,user_id,kind,value,detail,recorded_at,dose_index,created_at,feeding_method,memo) "
+                "SELECT id,dog_id,user_id,kind,value,detail,recorded_at,dose_index,created_at,"
+                f"{feeding_method_select},{memo_select} FROM records_legacy"
             )
             db.execute("DROP TABLE records_legacy")
+        if feeding_method_migration:
+            current_columns = {row["name"] for row in db.execute("PRAGMA table_info(records)")}
+            if "feeding_method" not in current_columns:
+                db.execute(
+                    "ALTER TABLE records ADD COLUMN feeding_method TEXT NOT NULL DEFAULT 'assisted' "
+                    "CHECK (feeding_method IN ('assisted', 'self'))"
+                )
+            db.execute(
+                "UPDATE records AS current SET feeding_method='self' "
+                "WHERE current.kind='feeding' AND current.id=("
+                "SELECT latest.id FROM records latest JOIN dogs d ON d.id=latest.dog_id "
+                "WHERE latest.dog_id=current.dog_id AND latest.kind='feeding' "
+                "AND d.name='주모닝' AND d.birth_year=2017 AND d.diagnosis='바베시아' "
+                "ORDER BY latest.recorded_at DESC,latest.id DESC LIMIT 1)"
+            )
+        if memo_migration:
+            current_columns = {row["name"] for row in db.execute("PRAGMA table_info(records)")}
+            if "memo" not in current_columns:
+                db.execute("ALTER TABLE records ADD COLUMN memo TEXT NOT NULL DEFAULT ''")
         db.execute("CREATE INDEX IF NOT EXISTS records_dog_kind_time ON records(dog_id, kind, recorded_at)")
         bootstrap_admin(db)
         ensure_admin_demo_dog(db)
@@ -242,8 +273,8 @@ def add_sample_records(db, dog_id, user_id):
         ("medication", None, "", "2026-10-07T15:30", 2),
     ]
     db.executemany(
-        "INSERT INTO records(dog_id,user_id,kind,value,detail,recorded_at,dose_index,created_at) "
-        "VALUES(?,?,?,?,?,?,?,?)",
+        "INSERT INTO records(dog_id,user_id,kind,value,detail,recorded_at,dose_index,created_at,feeding_method) "
+        "VALUES(?,?,?,?,?,?,?,?,?)",
         [
             (
                 dog_id,
@@ -254,9 +285,15 @@ def add_sample_records(db, dog_id, user_id):
                 datetime.fromisoformat(recorded).replace(tzinfo=KOREA_TIME).astimezone(timezone.utc).isoformat(timespec="minutes"),
                 dose_index,
                 now_iso(),
+                "assisted",
             )
             for kind, value, detail, recorded, dose_index in samples
         ],
+    )
+    db.execute(
+        "UPDATE records SET feeding_method='self' WHERE id=("
+        "SELECT id FROM records WHERE dog_id=? AND kind='feeding' ORDER BY recorded_at DESC,id DESC LIMIT 1)",
+        (dog_id,),
     )
     db.execute("INSERT INTO seeded_dog_data(dog_id) VALUES(?)", (dog_id,))
 
@@ -432,7 +469,7 @@ class AppHandler(BaseHTTPRequestHandler):
                         "ORDER BY m.dog_id,u.name"
                     ).fetchall()
                     records = db.execute(
-                        "SELECT r.id,r.kind,r.value,r.detail,r.recorded_at,r.dose_index,r.created_at,"
+                        "SELECT r.id,r.kind,r.value,r.detail,r.recorded_at,r.dose_index,r.created_at,r.feeding_method,r.memo,"
                         "d.id AS dog_id,d.name AS dog_name,u.name AS caregiver,u.email AS caregiver_email "
                         "FROM records r JOIN dogs d ON d.id=r.dog_id JOIN users u ON u.id=r.user_id "
                         "ORDER BY r.recorded_at DESC,r.id DESC"
@@ -479,7 +516,7 @@ class AppHandler(BaseHTTPRequestHandler):
                     return
 
                 dog_match = re.fullmatch(
-                    r"/api/dogs/(\d+)(?:/(temperature|feeding|medication|elimination|vitality|schedule|invite))?",
+                    r"/api/dogs/(\d+)(?:/(temperature|feeding|hydration|medication|elimination|vitality|schedule|invite))?",
                     path,
                 )
                 if dog_match:
@@ -524,7 +561,7 @@ class AppHandler(BaseHTTPRequestHandler):
                         return
                     if section in RECORD_KINDS and method == "GET":
                         rows = db.execute(
-                            "SELECT r.id,r.value,r.detail,r.recorded_at,r.dose_index,u.name AS caregiver "
+                            "SELECT r.id,r.value,r.detail,r.recorded_at,r.dose_index,r.feeding_method,r.memo,u.name AS caregiver "
                             "FROM records r JOIN users u ON u.id=r.user_id "
                             "WHERE r.dog_id=? AND r.kind=? ORDER BY r.recorded_at",
                             (dog_id, section),
@@ -536,6 +573,8 @@ class AppHandler(BaseHTTPRequestHandler):
                         value = None
                         dose_index = None
                         detail = clean_text(data.get("detail", ""), "메모", 200, allow_empty=True)
+                        memo = clean_text(data.get("memo", ""), "메모", 200, allow_empty=True)
+                        feeding_method = "assisted"
                         if section == "temperature":
                             try:
                                 value = float(data.get("value"))
@@ -551,6 +590,17 @@ class AppHandler(BaseHTTPRequestHandler):
                                 raise ValueError("급여량을 숫자로 입력해 주세요.") from exc
                             if not 0.1 <= value <= 2000:
                                 raise ValueError("급여량은 0.1~2,000ml 범위로 입력해 주세요.")
+                            value = round(value, 1)
+                            feeding_method = data.get("feeding_method", "assisted")
+                            if feeding_method not in ("assisted", "self"):
+                                raise ValueError("식사 방법을 선택해 주세요.")
+                        elif section == "hydration":
+                            try:
+                                value = float(data.get("value"))
+                            except (TypeError, ValueError) as exc:
+                                raise ValueError("음수량을 숫자로 입력해 주세요.") from exc
+                            if not 0.1 <= value <= 2000:
+                                raise ValueError("음수량은 0.1~2,000ml 범위로 입력해 주세요.")
                             value = round(value, 1)
                         elif section == "medication":
                             try:
@@ -570,10 +620,12 @@ class AppHandler(BaseHTTPRequestHandler):
                             if value not in (1, 2, 3):
                                 raise ValueError("활력 상태를 선택해 주세요.")
                             detail = {1: "좋음", 2: "보통", 3: "나쁨"}[value]
+                        else:
+                            memo = ""
                         db.execute(
-                            "INSERT INTO records(dog_id,user_id,kind,value,detail,recorded_at,dose_index,created_at) "
-                            "VALUES(?,?,?,?,?,?,?,?)",
-                            (dog_id, user["id"], section, value, detail, recorded_at, dose_index, now_iso()),
+                            "INSERT INTO records(dog_id,user_id,kind,value,detail,recorded_at,dose_index,created_at,feeding_method,memo) "
+                            "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                            (dog_id, user["id"], section, value, detail, recorded_at, dose_index, now_iso(), feeding_method, memo),
                         )
                         self.json_response(201, {"ok": True})
                         return
